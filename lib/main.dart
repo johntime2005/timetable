@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'calendar_exporter.dart';
 import 'course.dart';
 import 'course_html_parser.dart';
+import 'course_storage.dart';
 import 'education_web_import_page.dart';
 
 void main() {
@@ -387,7 +388,14 @@ class _TimetableHomePageState extends State<TimetableHomePage> {
   late int selectedWeekday = _normalizeWeekday(widget.initialWeekday ?? _currentSchoolWeekday());
   final CourseHtmlParser _htmlParser = const CourseHtmlParser();
   final CalendarExporter _calendarExporter = const CalendarExporter();
+  final CourseStorage _courseStorage = CourseStorage();
   List<Course> courses = sampleCourses.toList();
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreCourses();
+  }
 
   List<Course> get selectedCourses {
     final visibleCourses = courses.where((course) => course.weekday == selectedWeekday).toList()
@@ -395,11 +403,30 @@ class _TimetableHomePageState extends State<TimetableHomePage> {
     return visibleCourses;
   }
 
+  Future<void> _restoreCourses() async {
+    final restoredCourses = await _courseStorage.loadCourses();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      courses = restoredCourses;
+      if (restoredCourses.isNotEmpty) {
+        selectedWeekday = _normalizeWeekday(restoredCourses.first.weekday);
+      }
+    });
+  }
+
+  Future<void> _persistCourses() async {
+    await _courseStorage.saveCourses(courses);
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final isDark = theme.brightness == Brightness.dark;
+    final compactLayout = MediaQuery.sizeOf(context).height < 760;
     final weekdayLabel = weekdays[selectedWeekday - 1];
     final bodyColor = colorScheme.onSurface;
     final outline = isDark ? Colors.white.withValues(alpha: 0.08) : const Color(0xFFD9E4F5);
@@ -482,27 +509,27 @@ class _TimetableHomePageState extends State<TimetableHomePage> {
           ),
           SafeArea(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+              padding: EdgeInsets.fromLTRB(16, compactLayout ? 8 : 12, 16, 16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  const SizedBox(height: 68),
+                  SizedBox(height: compactLayout ? 16 : 48),
                   _HeroPanel(
                     weekdayLabel: weekdayLabel,
                     courseCount: selectedCourses.length,
                     onSurface: bodyColor,
                   ),
-                  const SizedBox(height: 18),
+                  SizedBox(height: compactLayout ? 12 : 18),
                   _WeekdaySelector(
                     selectedWeekday: selectedWeekday,
                     onSelected: (weekday) => setState(() => selectedWeekday = weekday),
                   ),
-                  const SizedBox(height: 18),
+                  SizedBox(height: compactLayout ? 12 : 18),
                   _TodaySummary(
                     weekday: selectedWeekday,
                     courseCount: selectedCourses.length,
                   ),
-                  const SizedBox(height: 18),
+                  SizedBox(height: compactLayout ? 12 : 18),
                   Expanded(
                     child: DecoratedBox(
                       decoration: BoxDecoration(
@@ -512,7 +539,11 @@ class _TimetableHomePageState extends State<TimetableHomePage> {
                       ),
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                        child: _CourseList(courses: selectedCourses),
+                        child: _CourseList(
+                          courses: selectedCourses,
+                          onEdit: _editCourse,
+                          onDelete: _deleteCourse,
+                        ),
                       ),
                     ),
                   ),
@@ -523,11 +554,63 @@ class _TimetableHomePageState extends State<TimetableHomePage> {
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _showComingSoon(context),
+        onPressed: _createCourse,
         icon: const Icon(Icons.add_rounded),
         label: const Text('添加课程', style: TextStyle(fontWeight: FontWeight.w700)),
       ),
     );
+  }
+
+  Future<void> _createCourse() async {
+    await _openCourseEditor();
+  }
+
+  Future<void> _editCourse(Course course) async {
+    final index = courses.indexOf(course);
+    if (index < 0) {
+      return;
+    }
+    await _openCourseEditor(course: course, index: index);
+  }
+
+  Future<void> _deleteCourse(Course course) async {
+    setState(() {
+      courses = courses.where((item) => item != course).toList();
+    });
+    await _persistCourses();
+    _showMessage('已删除 ${course.name}');
+  }
+
+  Future<void> _openCourseEditor({Course? course, int? index}) async {
+    final result = await showModalBottomSheet<Course>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => _CourseEditorSheet(initialCourse: course),
+    );
+    if (result == null) {
+      return;
+    }
+
+    final nextCourses = courses.toList();
+    if (index == null) {
+      nextCourses.add(result);
+    } else {
+      nextCourses[index] = result;
+    }
+    nextCourses.sort((left, right) {
+      final weekdayCompare = left.weekday.compareTo(right.weekday);
+      if (weekdayCompare != 0) {
+        return weekdayCompare;
+      }
+      return left.startSlot.compareTo(right.startSlot);
+    });
+
+    setState(() {
+      courses = nextCourses;
+      selectedWeekday = result.weekday;
+    });
+    await _persistCourses();
+    _showMessage(index == null ? '已添加 ${result.name}' : '已更新 ${result.name}');
   }
 
   Future<void> _openAppearanceSheet() async {
@@ -585,12 +668,13 @@ class _TimetableHomePageState extends State<TimetableHomePage> {
                     title: '上传背景图',
                     subtitle: '从本地图片生成背景，并自动提取主色。',
                     onTap: () async {
+                      final navigator = Navigator.of(context);
                       final success = await widget.onPickBackgroundImage();
                       if (!mounted) {
                         return;
                       }
                       if (success) {
-                        Navigator.of(context).pop();
+                        navigator.pop();
                         _showMessage('背景图已更新，并已自动生成配套主题色。');
                       }
                     },
@@ -602,11 +686,12 @@ class _TimetableHomePageState extends State<TimetableHomePage> {
                     subtitle: '恢复纯色氛围背景，但保留主题模式选择。',
                     enabled: widget.backgroundImage != null,
                     onTap: () async {
+                      final navigator = Navigator.of(context);
                       await widget.onClearBackgroundImage();
                       if (!mounted) {
                         return;
                       }
-                      Navigator.of(context).pop();
+                      navigator.pop();
                       _showMessage('已移除背景图，恢复默认背景。');
                     },
                   ),
@@ -634,12 +719,6 @@ class _TimetableHomePageState extends State<TimetableHomePage> {
     );
   }
 
-  void _showComingSoon(BuildContext context) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('下一步可接入添加课程表单和本地保存')),
-    );
-  }
-
   Future<void> _importFromHtml() async {
     try {
       final result = await FilePicker.platform.pickFiles(
@@ -663,6 +742,7 @@ class _TimetableHomePageState extends State<TimetableHomePage> {
         courses = importedCourses;
         selectedWeekday = _normalizeWeekday(importedCourses.first.weekday);
       });
+      await _persistCourses();
       _showMessage('已导入 ${importedCourses.length} 门课程');
     } on Exception catch (error) {
       _showMessage('导入失败：$error');
@@ -694,6 +774,7 @@ class _TimetableHomePageState extends State<TimetableHomePage> {
       courses = importedCourses;
       selectedWeekday = _normalizeWeekday(importedCourses.first.weekday);
     });
+    await _persistCourses();
     _showMessage('已从教务系统导入 ${importedCourses.length} 门课程');
   }
 
@@ -926,7 +1007,7 @@ class _HeroPanel extends StatelessWidget {
             children: <Widget>[
               _HeroMetricPill(label: '状态', value: courseCount == 0 ? '轻松日' : '学习中'),
               _HeroMetricPill(label: '课程数', value: courseCount.toString().padLeft(2, '0')),
-              _HeroMetricPill(label: '风格', value: 'Monet 联动'),
+              const _HeroMetricPill(label: '风格', value: 'Monet 联动'),
             ],
           ),
         ],
@@ -1238,9 +1319,15 @@ class _TodaySummary extends StatelessWidget {
 }
 
 class _CourseList extends StatelessWidget {
-  const _CourseList({required this.courses});
+  const _CourseList({
+    required this.courses,
+    required this.onEdit,
+    required this.onDelete,
+  });
 
   final List<Course> courses;
+  final ValueChanged<Course> onEdit;
+  final ValueChanged<Course> onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -1252,15 +1339,25 @@ class _CourseList extends StatelessWidget {
       padding: const EdgeInsets.only(top: 4, bottom: 8),
       itemCount: courses.length,
       separatorBuilder: (_, __) => const SizedBox(height: 14),
-      itemBuilder: (context, index) => _CourseCard(course: courses[index]),
+      itemBuilder: (context, index) => _CourseCard(
+        course: courses[index],
+        onEdit: () => onEdit(courses[index]),
+        onDelete: () => onDelete(courses[index]),
+      ),
     );
   }
 }
 
 class _CourseCard extends StatelessWidget {
-  const _CourseCard({required this.course});
+  const _CourseCard({
+    required this.course,
+    required this.onEdit,
+    required this.onDelete,
+  });
 
   final Course course;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -1333,17 +1430,38 @@ class _CourseCard extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: 12),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: course.color.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Text(
-                        '课程',
-                        style: theme.textTheme.labelMedium?.copyWith(
-                          color: course.color,
-                          fontWeight: FontWeight.w800,
+                    PopupMenuButton<_CourseAction>(
+                      tooltip: '课程操作',
+                      onSelected: (action) {
+                        switch (action) {
+                          case _CourseAction.edit:
+                            onEdit();
+                          case _CourseAction.delete:
+                            onDelete();
+                        }
+                      },
+                      itemBuilder: (context) => const <PopupMenuEntry<_CourseAction>>[
+                        PopupMenuItem<_CourseAction>(
+                          value: _CourseAction.edit,
+                          child: Text('编辑课程'),
+                        ),
+                        PopupMenuItem<_CourseAction>(
+                          value: _CourseAction.delete,
+                          child: Text('删除课程'),
+                        ),
+                      ],
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: course.color.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Text(
+                          '课程',
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: course.color,
+                            fontWeight: FontWeight.w800,
+                          ),
                         ),
                       ),
                     ),
@@ -1372,6 +1490,214 @@ class _CourseCard extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+enum _CourseAction { edit, delete }
+
+class _CourseEditorSheet extends StatefulWidget {
+  const _CourseEditorSheet({this.initialCourse});
+
+  final Course? initialCourse;
+
+  @override
+  State<_CourseEditorSheet> createState() => _CourseEditorSheetState();
+}
+
+class _CourseEditorSheetState extends State<_CourseEditorSheet> {
+  final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
+  late final TextEditingController _nameController;
+  late final TextEditingController _teacherController;
+  late final TextEditingController _roomController;
+  late final TextEditingController _startSlotController;
+  late final TextEditingController _endSlotController;
+  late final TextEditingController _weeksController;
+  late int _weekday;
+
+  @override
+  void initState() {
+    super.initState();
+    final course = widget.initialCourse;
+    _nameController = TextEditingController(text: course?.name ?? '');
+    _teacherController = TextEditingController(text: course?.teacher ?? '');
+    _roomController = TextEditingController(text: course?.room ?? '');
+    _startSlotController = TextEditingController(text: '${course?.startSlot ?? 1}');
+    _endSlotController = TextEditingController(text: '${course?.endSlot ?? 2}');
+    _weeksController = TextEditingController(text: _formatWeeks(course?.weeks ?? const <int>[]));
+    _weekday = course?.weekday ?? DateTime.monday;
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _teacherController.dispose();
+    _roomController.dispose();
+    _startSlotController.dispose();
+    _endSlotController.dispose();
+    _weeksController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(20, 20, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+      child: SingleChildScrollView(
+        child: Form(
+          key: _formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                widget.initialCourse == null ? '新建课程' : '编辑课程',
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _nameController,
+                decoration: const InputDecoration(labelText: '课程名称'),
+                validator: (value) => _required(value, '课程名称'),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _teacherController,
+                decoration: const InputDecoration(labelText: '授课教师'),
+                validator: (value) => _required(value, '授课教师'),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _roomController,
+                decoration: const InputDecoration(labelText: '上课地点'),
+                validator: (value) => _required(value, '上课地点'),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<int>(
+                initialValue: _weekday,
+                decoration: const InputDecoration(labelText: '星期'),
+                items: List<DropdownMenuItem<int>>.generate(
+                  weekdays.length,
+                  (index) => DropdownMenuItem<int>(
+                    value: index + 1,
+                    child: Text(weekdays[index]),
+                  ),
+                ),
+                onChanged: (value) {
+                  if (value != null) {
+                    _weekday = value;
+                  }
+                },
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: TextFormField(
+                      controller: _startSlotController,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: '开始节次'),
+                      validator: (value) => _slot(value, '开始节次'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextFormField(
+                      controller: _endSlotController,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: '结束节次'),
+                      validator: (value) => _slot(value, '结束节次'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _weeksController,
+                decoration: const InputDecoration(labelText: '周次', hintText: '例如 1-16'),
+                validator: (value) => _parseWeeks(value).isEmpty ? '请输入有效周次，例如 1-16' : null,
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: _submit,
+                  child: const Text('保存课程'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String? _required(String? value, String label) {
+    if (value == null || value.trim().isEmpty) {
+      return '请输入$label';
+    }
+    return null;
+  }
+
+  String? _slot(String? value, String label) {
+    final parsed = int.tryParse((value ?? '').trim());
+    if (parsed == null || parsed < 1 || parsed > 12) {
+      return '$label需为 1-12';
+    }
+    return null;
+  }
+
+  List<int> _parseWeeks(String? input) {
+    final trimmed = (input ?? '').trim();
+    final range = RegExp(r'^(\d{1,2})\s*[-~至到]\s*(\d{1,2})$').firstMatch(trimmed);
+    if (range != null) {
+      final start = int.parse(range.group(1)!);
+      final end = int.parse(range.group(2)!);
+      if (end < start) {
+        return const <int>[];
+      }
+      return List<int>.generate(end - start + 1, (index) => start + index);
+    }
+    final single = int.tryParse(trimmed);
+    return single == null ? const <int>[] : <int>[single];
+  }
+
+  String _formatWeeks(List<int> weeks) {
+    if (weeks.isEmpty) {
+      return '1-16';
+    }
+    if (weeks.length == 1) {
+      return '${weeks.first}';
+    }
+    return '${weeks.first}-${weeks.last}';
+  }
+
+  void _submit() {
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+
+    final startSlot = int.parse(_startSlotController.text.trim());
+    final endSlot = int.parse(_endSlotController.text.trim());
+    if (endSlot < startSlot) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('结束节次不能早于开始节次')),
+      );
+      return;
+    }
+
+    final color = widget.initialCourse?.color ?? coursePalette[(_weekday + startSlot + endSlot) % coursePalette.length];
+    Navigator.of(context).pop(
+      Course(
+        name: _nameController.text.trim(),
+        teacher: _teacherController.text.trim(),
+        room: _roomController.text.trim(),
+        weekday: _weekday,
+        startSlot: startSlot,
+        endSlot: endSlot,
+        color: color,
+        weeks: _parseWeeks(_weeksController.text),
       ),
     );
   }
