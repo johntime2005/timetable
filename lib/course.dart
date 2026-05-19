@@ -21,6 +21,19 @@ class Course {
   final Color color;
   final List<int> weeks;
 
+  factory Course.fromJson(Map<String, dynamic> json) {
+    return Course(
+      name: json['name'] as String? ?? '未命名课程',
+      teacher: json['teacher'] as String? ?? '未填写教师',
+      room: json['room'] as String? ?? '未填写教室',
+      weekday: json['weekday'] as int? ?? DateTime.monday,
+      startSlot: json['startSlot'] as int? ?? 1,
+      endSlot: json['endSlot'] as int? ?? 1,
+      color: Color(json['color'] as int? ?? coursePalette.first.toARGB32()),
+      weeks: ((json['weeks'] as List<dynamic>?) ?? const <dynamic>[]).map((item) => item as int).toList(),
+    );
+  }
+
   String get timeText => '第$startSlot-$endSlot节';
 
   String get weekText {
@@ -31,6 +44,19 @@ class Course {
       return '第${weeks.first}周';
     }
     return '第${weeks.first}-${weeks.last}周';
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'name': name,
+      'teacher': teacher,
+      'room': room,
+      'weekday': weekday,
+      'startSlot': startSlot,
+      'endSlot': endSlot,
+      'color': color.toARGB32(),
+      'weeks': weeks,
+    };
   }
 }
 

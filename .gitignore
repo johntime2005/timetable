@@ -22,6 +22,7 @@ migrate_working_dir/
 # Local AI / workflow metadata
 .serena/
 .spec-workflow/
+.playwright-mcp/
 
 # Flutter/Dart/Pub related
 **/doc/api/
